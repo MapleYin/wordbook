@@ -3,14 +3,27 @@
 import { revalidatePath } from 'next/cache';
 import { createClient, requireUser } from '@/lib/supabase/server';
 import { getOrFetchDictionaryEntry } from '@/lib/dictionary/getOrFetchDictionaryEntry';
-import { generateExplanation } from '@/lib/anthropic/generateExplanation';
+import { translateSentence } from '@/lib/qwen/translateSentence';
+import { generateWordExplanation } from '@/lib/qwen/generateWordExplanation';
 import type {
+  DictionaryEntry,
   ExplanationLanguage,
   SentenceWithSource,
   SourceType,
   WordEntry,
   WordSelection,
 } from '@/lib/words/types';
+
+function fieldsFromDictionary(entry: DictionaryEntry | null): {
+  part_of_speech: string;
+  definition: string;
+} {
+  const firstMeaning = entry?.meanings[0];
+  return {
+    part_of_speech: firstMeaning?.partOfSpeech ?? '',
+    definition: firstMeaning?.definitions[0] ?? '',
+  };
+}
 
 export interface AddWordsFromSentenceInput {
   sentenceText: string;
@@ -73,14 +86,16 @@ export async function addWordsFromSentence(
   if (sentenceError) throw new Error(sentenceError.message);
 
   const aiErrors: string[] = [];
-  let sentenceTranslation: string | null = null;
+
+  const translationResult = await translateSentence(sentenceText, input.language);
+  if (!translationResult.ok) aiErrors.push(`Sentence translation: ${translationResult.error.message}`);
 
   const rowsToInsert = await Promise.all(
     input.selections.map(async (selection) => {
       const headword = selection.text.toLowerCase();
       const dictEntry = await getOrFetchDictionaryEntry(supabase, headword);
 
-      const result = await generateExplanation({
+      const result = await generateWordExplanation({
         word: selection.text,
         sentence: sentenceText,
         highlightStart: selection.start,
@@ -90,7 +105,6 @@ export async function addWordsFromSentence(
       });
 
       if (result.ok) {
-        if (sentenceTranslation === null) sentenceTranslation = result.data.sentence_translation;
         return {
           user_id: user.id,
           sentence_id: sentence.id,
@@ -115,8 +129,7 @@ export async function addWordsFromSentence(
         highlight_end: selection.end,
         language: input.language,
         explanation: '',
-        part_of_speech: '',
-        definition: '',
+        ...fieldsFromDictionary(dictEntry),
       };
     }),
   );
@@ -128,10 +141,10 @@ export async function addWordsFromSentence(
   if (entriesError) throw new Error(entriesError.message);
 
   let finalSentence: SentenceWithSource = sentence;
-  if (sentenceTranslation !== null) {
+  if (translationResult.ok) {
     const { data: updatedSentence, error: updateError } = await supabase
       .from('sentences')
-      .update({ translation: sentenceTranslation, translation_language: input.language })
+      .update({ translation: translationResult.translation, translation_language: input.language })
       .eq('id', sentence.id)
       .select('*, source:sources(*)')
       .single();
@@ -158,7 +171,7 @@ export async function regenerateWordExplanation(
   if (fetchError || !entry) return { ok: false, error: 'Word not found.' };
 
   const dictEntry = await getOrFetchDictionaryEntry(supabase, entry.headword);
-  const result = await generateExplanation({
+  const result = await generateWordExplanation({
     word: entry.word,
     sentence: entry.sentence.text,
     highlightStart: entry.highlight_start,

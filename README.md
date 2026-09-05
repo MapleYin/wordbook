@@ -8,9 +8,11 @@ account.
 
 - Next.js (App Router, TypeScript), Tailwind CSS
 - Supabase (Postgres, Auth, Row Level Security)
-- Anthropic Claude API for contextual explanations
+- Qwen (通义千问, via Alibaba Cloud DashScope's OpenAI-compatible endpoint) for contextual
+  explanations and sentence translation
 - [dictionaryapi.dev](https://dictionaryapi.dev) (free, keyless) for English phonetics, audio,
-  and generic definitions
+  and generic definitions — also used as reference context for the AI, and as a fallback if an
+  AI call fails
 
 ## Setup
 
@@ -20,7 +22,8 @@ account.
    otherwise new sign-ups need to click a confirmation link before they can sign in.
 3. Copy `.env.local.example` to `.env.local` and fill in:
    - `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` from your Supabase project
-   - `ANTHROPIC_API_KEY` (and optionally `ANTHROPIC_MODEL`, defaults to `claude-sonnet-5`)
+   - `DASHSCOPE_API_KEY` from [DashScope](https://dashscope.console.aliyun.com) (and optionally
+     `QWEN_MODEL` / `QWEN_BASE_URL`, defaults to `qwen-plus` on the mainland China endpoint)
 4. `npm install`
 5. `npm run dev` and open [http://localhost:3000](http://localhost:3000)
 
@@ -28,7 +31,7 @@ account.
 
 - `sources` — books/articles a sentence can be attributed to
 - `sentences` — pasted sentences, optionally linked to a source, with a cached sentence
-  translation
+  translation (one Qwen call per sentence, shared across every word marked in it)
 - `word_entries` — one row per marked word occurrence in a sentence, with its contextual
   explanation, part of speech, and definition
 - `word_dictionary_cache` — a shared cache of free-dictionary lookups (phonetic, audio,
