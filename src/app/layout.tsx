@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
-import { Source_Serif_4, Inter } from "next/font/google";
+import { Spectral, Inter } from "next/font/google";
+import { Toaster } from "sonner";
 import "./globals.css";
 
-const serif = Source_Serif_4({
-  variable: "--font-source-serif",
+const serif = Spectral({
+  variable: "--font-spectral",
   subsets: ["latin"],
   weight: ["400", "600"],
 });
@@ -21,7 +22,10 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html lang="en" className={`${serif.variable} ${sans.variable} h-full antialiased`}>
-      <body className="min-h-full flex flex-col bg-paper text-ink">{children}</body>
+      <body className="min-h-full flex flex-col bg-paper text-ink">
+        {children}
+        <Toaster position="bottom-right" richColors />
+      </body>
     </html>
   );
 }

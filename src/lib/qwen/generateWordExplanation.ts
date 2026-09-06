@@ -1,78 +1,53 @@
+import OpenAI from 'openai';
 import { qwen, QWEN_MODEL } from '@/lib/qwen/client';
 import { mapQwenError, type QwenError } from '@/lib/qwen/errors';
-import type { DictionaryMeaning, ExplanationLanguage } from '@/lib/words/types';
+import type { EntryType, ExplanationLanguage } from '@/lib/words/types';
 
-export interface ExplanationResult {
-  part_of_speech: string;
-  explanation: string;
-  definition: string;
-}
-
-export type GenerateExplanationResult = { ok: true; data: ExplanationResult } | { ok: false; error: QwenError };
-
-export interface GenerateExplanationInput {
+export interface GenerateWordExplanationInput {
   word: string;
   sentence: string;
-  highlightStart: number;
-  highlightEnd: number;
   language: ExplanationLanguage;
-  dictionaryMeanings?: DictionaryMeaning[];
+  entryType: EntryType;
 }
 
-const FULL_TOOL_NAME = 'explain_word_in_sentence';
-const NO_DEFINITION_TOOL_NAME = 'explain_word_in_sentence_with_dictionary_definition';
-
-function resolveDefinitionFromDictionary(partOfSpeech: string, meanings: DictionaryMeaning[]): string {
-  const normalized = partOfSpeech.trim().toLowerCase();
-  const matching = meanings.find((m) => m.partOfSpeech.trim().toLowerCase() === normalized);
-  const chosen = matching ?? meanings[0];
-  return chosen?.definitions[0] ?? '';
+export interface WordExplanationData {
+  phonetic: string;
+  explanation: string;
+  partOfSpeech: string;
+  sentenceTranslation: string;
 }
+
+export type GenerateWordExplanationResult =
+  | { ok: true; data: WordExplanationData }
+  | { ok: false; error: QwenError };
+
+const TOOL_NAME = 'explain_word_in_sentence';
 
 export async function generateWordExplanation(
-  input: GenerateExplanationInput,
-): Promise<GenerateExplanationResult> {
-  const targetLangLabel = input.language === 'zh' ? 'Chinese (Simplified)' : 'English';
-  const useDictionaryDefinition =
-    input.language === 'en' && !!input.dictionaryMeanings && input.dictionaryMeanings.length > 0;
+  input: GenerateWordExplanationInput,
+): Promise<GenerateWordExplanationResult> {
+  const target = input.language === 'zh' ? 'Chinese (Simplified)' : 'English';
+  const isPhrase = input.entryType === 'phrase';
+  const label = isPhrase ? 'Phrase' : 'Word';
+  const phoneticPrompt = isPhrase
+    ? 'the IPA pronunciation, or an empty string if this phrase has no single standard pronunciation worth noting'
+    : 'the IPA pronunciation of the word wrapped in slashes, e.g. /dɪˈmiːnə/';
+  const partOfSpeechPrompt = isPhrase
+    ? 'a short usage category for the phrase, e.g. idiom, phrasal verb, fixed collocation, or informal expression'
+    : 'part of speech in English, e.g. noun, verb, adjective';
 
-  const promptLines = [
-    `Sentence: ${input.sentence}`,
-    `Marked word (characters ${input.highlightStart}-${input.highlightEnd}): "${input.word}"`,
-    `Write your answer in ${targetLangLabel}.`,
-    `Explain what "${input.word}" means AS USED in this specific sentence — not a generic dictionary dump.`,
-  ];
+  const prompt = `You help an English learner build a vocabulary notebook.
 
-  if (useDictionaryDefinition && input.dictionaryMeanings) {
-    promptLines.push(
-      'Reference dictionary entries for this word (pick the part of speech that matches its use in the sentence):',
-      ...input.dictionaryMeanings.map(
-        (m) => `- ${m.partOfSpeech}: ${m.definitions.slice(0, 2).join('; ')}`,
-      ),
-    );
-  }
+${label}: "${input.word}"
+Sentence it appeared in: "${input.sentence}"
 
-  const toolName = useDictionaryDefinition ? NO_DEFINITION_TOOL_NAME : FULL_TOOL_NAME;
-  const properties: Record<string, { type: string; description: string }> = {
-    part_of_speech: {
-      type: 'string',
-      description: useDictionaryDefinition
-        ? 'The part of speech as used in this sentence, matching one of the reference dictionary entries when possible (e.g. noun, verb, phrasal verb, idiom)'
-        : 'e.g. noun, verb, phrasal verb, idiom',
-    },
-    explanation: {
-      type: 'string',
-      description: 'What the word means as used in this exact sentence, 1-3 sentences, in the target language',
-    },
-  };
-  const required = ['part_of_speech', 'explanation'];
-  if (!useDictionaryDefinition) {
-    properties.definition = {
-      type: 'string',
-      description: 'Simple dictionary-style definition, in the target language',
-    };
-    required.push('definition');
-  }
+Use the sentence only to pick which sense of the word or phrase applies. Reply with json only, no prose, using exactly these keys:
+{
+  "phonetic": "${phoneticPrompt}",
+  "explanation": "the plain dictionary meaning of the word or phrase, in the sense that fits this sentence, written in ${target}. Just the meaning itself — no mention of the sentence or how it's used there.",
+  "partOfSpeech": "${partOfSpeechPrompt}",
+  "sentenceTranslation": "the whole sentence rendered in ${target}"
+}`;
 
   try {
     const completion = await qwen.chat.completions.create({
@@ -81,52 +56,71 @@ export async function generateWordExplanation(
         {
           role: 'system',
           content:
-            'You are a meticulous vocabulary tutor helping a language learner build a personal word notebook. Always call the provided tool with your answer.',
+            'You are a meticulous dictionary editor helping a language learner build a personal vocabulary notebook. Give plain dictionary definitions, not contextual paraphrases. Always call the provided tool with your answer.',
         },
-        { role: 'user', content: promptLines.join('\n') },
+        { role: 'user', content: prompt },
       ],
       tools: [
         {
           type: 'function',
           function: {
-            name: toolName,
-            description: useDictionaryDefinition
-              ? 'Record the contextual meaning and part of speech for the marked word. A dictionary definition is already available and will be attached separately.'
-              : 'Record the contextual meaning, part of speech, and simple definition for the marked word.',
+            name: TOOL_NAME,
+            description: 'Record the pronunciation, dictionary meaning, part of speech, and sentence translation.',
             parameters: {
               type: 'object',
-              properties,
-              required,
+              properties: {
+                phonetic: {
+                  type: 'string',
+                  description: isPhrase
+                    ? 'The IPA pronunciation, or an empty string if this phrase has no single standard pronunciation worth noting'
+                    : 'The IPA pronunciation of the word wrapped in slashes, e.g. /dɪˈmiːnə/',
+                },
+                explanation: {
+                  type: 'string',
+                  description: `The plain dictionary meaning of the word or phrase, in the sense that fits this sentence, written in ${target}. Just the meaning itself — no mention of the sentence or how it's used there.`,
+                },
+                partOfSpeech: {
+                  type: 'string',
+                  description: isPhrase
+                    ? 'A short usage category for the phrase, e.g. idiom, phrasal verb, fixed collocation, or informal expression'
+                    : 'Part of speech in English, e.g. noun, verb, adjective',
+                },
+                sentenceTranslation: {
+                  type: 'string',
+                  description: `The whole sentence rendered in ${target}`,
+                },
+              },
+              required: isPhrase
+                ? ['explanation', 'partOfSpeech', 'sentenceTranslation']
+                : ['phonetic', 'explanation', 'partOfSpeech', 'sentenceTranslation'],
               additionalProperties: false,
             },
           },
         },
       ],
-      tool_choice: { type: 'function', function: { name: toolName } },
-    });
+      tool_choice: { type: 'function', function: { name: TOOL_NAME } },
+      // DashScope rejects a forced tool_choice while thinking mode is active.
+      enable_thinking: false,
+    } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming);
 
     const toolCall = completion.choices[0]?.message.tool_calls?.[0];
     if (!toolCall || toolCall.type !== 'function') {
       return { ok: false, error: { kind: 'unknown', message: 'Qwen did not return structured output.' } };
     }
 
-    const parsed = JSON.parse(toolCall.function.arguments) as {
-      part_of_speech?: string;
-      explanation?: string;
-      definition?: string;
-    };
-    if (!parsed.part_of_speech || !parsed.explanation) {
+    const parsed = JSON.parse(toolCall.function.arguments) as Partial<WordExplanationData>;
+    if (!parsed.explanation || !parsed.partOfSpeech || !parsed.sentenceTranslation || (!isPhrase && !parsed.phonetic)) {
       return { ok: false, error: { kind: 'unknown', message: 'Qwen returned an incomplete answer.' } };
     }
 
-    const definition =
-      useDictionaryDefinition && input.dictionaryMeanings
-        ? resolveDefinitionFromDictionary(parsed.part_of_speech, input.dictionaryMeanings)
-        : parsed.definition ?? '';
-
     return {
       ok: true,
-      data: { part_of_speech: parsed.part_of_speech, explanation: parsed.explanation, definition },
+      data: {
+        phonetic: parsed.phonetic ?? '',
+        explanation: parsed.explanation,
+        partOfSpeech: parsed.partOfSpeech,
+        sentenceTranslation: parsed.sentenceTranslation,
+      },
     };
   } catch (err) {
     return { ok: false, error: mapQwenError(err) };

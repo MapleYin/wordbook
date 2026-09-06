@@ -1,3 +1,4 @@
+import OpenAI from 'openai';
 import { qwen, QWEN_MODEL } from '@/lib/qwen/client';
 import { mapQwenError, type QwenError } from '@/lib/qwen/errors';
 import type { ExplanationLanguage } from '@/lib/words/types';
@@ -45,7 +46,9 @@ export async function translateSentence(
         },
       ],
       tool_choice: { type: 'function', function: { name: TOOL_NAME } },
-    });
+      // DashScope rejects a forced tool_choice while thinking mode is active.
+      enable_thinking: false,
+    } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming);
 
     const toolCall = completion.choices[0]?.message.tool_calls?.[0];
     if (!toolCall || toolCall.type !== 'function') {

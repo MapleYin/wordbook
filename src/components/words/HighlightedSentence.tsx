@@ -1,34 +1,54 @@
-export const highlightClass = 'text-ink-700 font-semibold underline decoration-2 decoration-ink-500 underline-offset-4';
+import type { ReactNode } from 'react';
 
-interface HighlightedSentenceProps {
-  sentence: string;
+export const highlightClass = 'rounded-sm bg-accent px-1 text-accent-foreground';
+
+export interface HighlightRange {
   start: number;
   end: number;
   hidden?: boolean;
   onReveal?: () => void;
 }
 
-export function HighlightedSentence({ sentence, start, end, hidden, onReveal }: HighlightedSentenceProps) {
-  const before = sentence.slice(0, start);
-  const marked = sentence.slice(start, end);
-  const after = sentence.slice(end);
+interface HighlightedSentenceProps {
+  sentence: string;
+  highlights: HighlightRange[];
+  className?: string;
+}
 
-  return (
-    <p className="font-serif text-lg leading-relaxed text-ink">
-      {before}
-      {hidden ? (
+/** Inline text with one or more marked ranges, each its own rounded highlight chip. Wrap in a block element. */
+export function HighlightedSentence({ sentence, highlights, className }: HighlightedSentenceProps) {
+  const sorted = [...highlights].sort((a, b) => a.start - b.start);
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+
+  sorted.forEach((h, i) => {
+    if (h.start > cursor) parts.push(<span key={`text-${i}`}>{sentence.slice(cursor, h.start)}</span>);
+    const marked = sentence.slice(h.start, h.end);
+
+    if (h.hidden) {
+      parts.push(
         <button
+          key={`blank-${i}`}
           type="button"
-          onClick={onReveal}
-          className="mx-0.5 rounded border border-dashed border-ink-500/50 px-2 text-transparent"
+          onClick={h.onReveal}
           aria-label="Reveal word"
+          className="mx-0.5 inline-block min-w-16 rounded-sm border-b-2 border-dashed border-accent-foreground/50 align-baseline text-transparent select-none"
         >
-          {marked.replace(/[^\s]/g, '▁')}
-        </button>
-      ) : (
-        <mark className={`bg-transparent ${highlightClass}`}>{marked}</mark>
-      )}
-      {after}
-    </p>
-  );
+          {'·'.repeat(Math.max(marked.length, 4))}
+        </button>,
+      );
+    } else {
+      parts.push(
+        <mark key={`mark-${i}`} className={highlightClass}>
+          {marked}
+        </mark>,
+      );
+    }
+
+    cursor = Math.max(cursor, h.end);
+  });
+
+  if (cursor < sentence.length) parts.push(<span key="text-last">{sentence.slice(cursor)}</span>);
+
+  return <span className={className}>{parts}</span>;
 }

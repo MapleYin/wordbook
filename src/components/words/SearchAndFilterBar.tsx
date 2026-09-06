@@ -1,4 +1,4 @@
-import type { ExplanationLanguage, Source } from '@/lib/words/types';
+import type { EntryType, ExplanationLanguage, Source } from '@/lib/words/types';
 
 interface SearchAndFilterBarProps {
   search: string;
@@ -8,6 +8,8 @@ interface SearchAndFilterBarProps {
   sourceId: string | 'all';
   onSourceIdChange: (value: string | 'all') => void;
   sources: Source[];
+  entryType: EntryType | 'all';
+  onEntryTypeChange: (value: EntryType | 'all') => void;
 }
 
 export function SearchAndFilterBar({
@@ -18,6 +20,8 @@ export function SearchAndFilterBar({
   sourceId,
   onSourceIdChange,
   sources,
+  entryType,
+  onEntryTypeChange,
 }: SearchAndFilterBarProps) {
   return (
     <div className="flex flex-wrap gap-3 font-sans text-sm">
@@ -48,6 +52,15 @@ export function SearchAndFilterBar({
             {source.title}
           </option>
         ))}
+      </select>
+      <select
+        value={entryType}
+        onChange={(e) => onEntryTypeChange(e.target.value as EntryType | 'all')}
+        className="rounded-md border border-ink/20 bg-white/60 px-2 py-1.5 text-ink outline-none focus:border-ink"
+      >
+        <option value="all">All types</option>
+        <option value="word">Words</option>
+        <option value="phrase">Phrases</option>
       </select>
     </div>
   );

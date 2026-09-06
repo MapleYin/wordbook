@@ -1,5 +1,6 @@
 export type ExplanationLanguage = 'zh' | 'en';
 export type SourceType = 'book' | 'article' | 'other';
+export type EntryType = 'word' | 'phrase';
 
 export interface Source {
   id: string;
@@ -31,6 +32,8 @@ export interface WordEntry {
   explanation: string;
   part_of_speech: string;
   definition: string;
+  phonetic: string;
+  entry_type: EntryType;
   created_at: string;
 }
 
@@ -42,16 +45,9 @@ export interface WordEntryWithSentence extends WordEntry {
   sentence: SentenceWithSource;
 }
 
-export interface DictionaryMeaning {
-  partOfSpeech: string;
-  definitions: string[];
-}
-
+/** Shape of a `word_dictionary_cache` row — a historical phonetic fallback for older entries. */
 export interface DictionaryEntry {
-  headword: string;
   phonetic: string | null;
-  audio_url: string | null;
-  meanings: DictionaryMeaning[];
 }
 
 export interface WordSelection {

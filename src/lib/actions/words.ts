@@ -2,27 +2,46 @@
 
 import { revalidatePath } from 'next/cache';
 import { createClient, requireUser } from '@/lib/supabase/server';
-import { getOrFetchDictionaryEntry } from '@/lib/dictionary/getOrFetchDictionaryEntry';
-import { translateSentence } from '@/lib/qwen/translateSentence';
 import { generateWordExplanation } from '@/lib/qwen/generateWordExplanation';
-import type {
-  DictionaryEntry,
-  ExplanationLanguage,
-  SentenceWithSource,
-  SourceType,
-  WordEntry,
-  WordSelection,
-} from '@/lib/words/types';
+import { translateSentence } from '@/lib/qwen/translateSentence';
+import { inferEntryType } from '@/lib/words/entryType';
+import type { ExplanationLanguage, SentenceWithSource, SourceType, WordEntry } from '@/lib/words/types';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
-function fieldsFromDictionary(entry: DictionaryEntry | null): {
+export interface SourceSelectionInput {
+  sourceId?: string | null;
+  newSourceTitle?: string | null;
+  newSourceType?: SourceType;
+}
+
+/** Resolves a source selection to a source id, creating the source first if a new title was given. */
+async function resolveSourceId(
+  supabase: SupabaseClient,
+  userId: string,
+  selection: SourceSelectionInput,
+): Promise<string | null> {
+  if (selection.newSourceTitle?.trim()) {
+    const { data: source, error } = await supabase
+      .from('sources')
+      .upsert(
+        { user_id: userId, title: selection.newSourceTitle.trim(), type: selection.newSourceType ?? 'other' },
+        { onConflict: 'user_id,title' },
+      )
+      .select()
+      .single();
+    if (error) throw new Error(error.message);
+    return source.id;
+  }
+  return selection.sourceId ?? null;
+}
+
+export interface WordEntryDraftInput {
+  start: number;
+  end: number;
+  text: string;
+  phonetic: string;
   part_of_speech: string;
-  definition: string;
-} {
-  const firstMeaning = entry?.meanings[0];
-  return {
-    part_of_speech: firstMeaning?.partOfSpeech ?? '',
-    definition: firstMeaning?.definitions[0] ?? '',
-  };
+  meaning: string;
 }
 
 export interface AddWordsFromSentenceInput {
@@ -31,28 +50,36 @@ export interface AddWordsFromSentenceInput {
   newSourceTitle?: string | null;
   newSourceType?: SourceType;
   language: ExplanationLanguage;
-  selections: WordSelection[];
+  translation?: string | null;
+  drafts: WordEntryDraftInput[];
 }
 
 export interface AddWordsFromSentenceResult {
   sentence: SentenceWithSource;
   wordEntries: WordEntry[];
-  aiErrors: string[];
+  /** Words that were skipped because that headword was already marked in this sentence. */
+  skippedWords: string[];
 }
 
-function validateSelections(sentenceText: string, selections: WordSelection[]) {
-  for (const selection of selections) {
+function validateDrafts(sentenceText: string, drafts: WordEntryDraftInput[]) {
+  for (const draft of drafts) {
     if (
-      selection.start < 0 ||
-      selection.end <= selection.start ||
-      selection.end > sentenceText.length ||
-      sentenceText.slice(selection.start, selection.end) !== selection.text
+      draft.start < 0 ||
+      draft.end <= draft.start ||
+      draft.end > sentenceText.length ||
+      sentenceText.slice(draft.start, draft.end) !== draft.text
     ) {
-      throw new Error(`Invalid word selection: "${selection.text}" (${selection.start}-${selection.end})`);
+      throw new Error(`Invalid word selection: "${draft.text}" (${draft.start}-${draft.end})`);
     }
   }
 }
 
+/**
+ * Persists a sentence and its marked words exactly as composed in the form —
+ * whether each field was typed by hand or filled via lookupWordEntry/
+ * translateSentenceForForm. No AI calls happen here, so saving never fails
+ * because of an upstream model error.
+ */
 export async function addWordsFromSentence(
   input: AddWordsFromSentenceInput,
 ): Promise<AddWordsFromSentenceResult> {
@@ -61,78 +88,96 @@ export async function addWordsFromSentence(
 
   const sentenceText = input.sentenceText.trim();
   if (!sentenceText) throw new Error('Sentence text is required.');
-  if (input.selections.length === 0) throw new Error('Select at least one word.');
-  validateSelections(sentenceText, input.selections);
+  if (input.drafts.length === 0) throw new Error('Select at least one word.');
+  validateDrafts(sentenceText, input.drafts);
 
-  let sourceId = input.sourceId ?? null;
-  if (input.newSourceTitle?.trim()) {
-    const { data: source, error: sourceError } = await supabase
-      .from('sources')
-      .upsert(
-        { user_id: user.id, title: input.newSourceTitle.trim(), type: input.newSourceType ?? 'other' },
-        { onConflict: 'user_id,title' },
-      )
-      .select()
+  const sourceId = await resolveSourceId(supabase, user.id, input);
+
+  const translation = input.translation?.trim() || null;
+
+  // Reuse an existing sentence with identical text instead of creating a duplicate.
+  const { data: matches, error: matchError } = await supabase
+    .from('sentences')
+    .select('*, source:sources(*)')
+    .eq('user_id', user.id)
+    .eq('text', sentenceText)
+    .order('created_at', { ascending: true })
+    .limit(1);
+  if (matchError) throw new Error(matchError.message);
+
+  let sentence = matches?.[0] ?? null;
+  if (sentence) {
+    const updates: Record<string, unknown> = {};
+    if (!sentence.source_id && sourceId) updates.source_id = sourceId;
+    if (!sentence.translation && translation) {
+      updates.translation = translation;
+      updates.translation_language = input.language;
+    }
+    if (Object.keys(updates).length > 0) {
+      const { data: updated, error: updateError } = await supabase
+        .from('sentences')
+        .update(updates)
+        .eq('id', sentence.id)
+        .select('*, source:sources(*)')
+        .single();
+      if (updateError) throw new Error(updateError.message);
+      sentence = updated;
+    }
+  } else {
+    const { data: inserted, error: sentenceError } = await supabase
+      .from('sentences')
+      .insert({
+        user_id: user.id,
+        source_id: sourceId,
+        text: sentenceText,
+        translation,
+        translation_language: translation ? input.language : null,
+      })
+      .select('*, source:sources(*)')
       .single();
-    if (sourceError) throw new Error(sourceError.message);
-    sourceId = source.id;
+    if (sentenceError) throw new Error(sentenceError.message);
+    sentence = inserted;
   }
 
-  const { data: sentence, error: sentenceError } = await supabase
-    .from('sentences')
-    .insert({ user_id: user.id, source_id: sourceId, text: sentenceText })
-    .select('*, source:sources(*)')
-    .single();
-  if (sentenceError) throw new Error(sentenceError.message);
+  // Skip words already marked in this sentence — same headword marked twice
+  // (across submissions, or twice within one submission) merges into one entry.
+  const { data: existingEntries, error: existingEntriesError } = await supabase
+    .from('word_entries')
+    .select('headword')
+    .eq('sentence_id', sentence.id);
+  if (existingEntriesError) throw new Error(existingEntriesError.message);
 
-  const aiErrors: string[] = [];
+  const seenHeadwords = new Set((existingEntries ?? []).map((e) => e.headword));
+  const skippedWords: string[] = [];
+  const newDrafts: WordEntryDraftInput[] = [];
+  for (const draft of input.drafts) {
+    const headword = draft.text.toLowerCase();
+    if (seenHeadwords.has(headword)) {
+      skippedWords.push(draft.text);
+      continue;
+    }
+    seenHeadwords.add(headword);
+    newDrafts.push(draft);
+  }
 
-  const translationResult = await translateSentence(sentenceText, input.language);
-  if (!translationResult.ok) aiErrors.push(`Sentence translation: ${translationResult.error.message}`);
+  if (newDrafts.length === 0) {
+    throw new Error('These words are already in your collection for this sentence.');
+  }
 
-  const rowsToInsert = await Promise.all(
-    input.selections.map(async (selection) => {
-      const headword = selection.text.toLowerCase();
-      const dictEntry = await getOrFetchDictionaryEntry(supabase, headword);
-
-      const result = await generateWordExplanation({
-        word: selection.text,
-        sentence: sentenceText,
-        highlightStart: selection.start,
-        highlightEnd: selection.end,
-        language: input.language,
-        dictionaryMeanings: dictEntry?.meanings,
-      });
-
-      if (result.ok) {
-        return {
-          user_id: user.id,
-          sentence_id: sentence.id,
-          word: selection.text,
-          headword,
-          highlight_start: selection.start,
-          highlight_end: selection.end,
-          language: input.language,
-          explanation: result.data.explanation,
-          part_of_speech: result.data.part_of_speech,
-          definition: result.data.definition,
-        };
-      }
-
-      aiErrors.push(`"${selection.text}": ${result.error.message}`);
-      return {
-        user_id: user.id,
-        sentence_id: sentence.id,
-        word: selection.text,
-        headword,
-        highlight_start: selection.start,
-        highlight_end: selection.end,
-        language: input.language,
-        explanation: '',
-        ...fieldsFromDictionary(dictEntry),
-      };
-    }),
-  );
+  const rowsToInsert = newDrafts.map((draft) => ({
+    user_id: user.id,
+    sentence_id: sentence.id,
+    word: draft.text,
+    headword: draft.text.toLowerCase(),
+    highlight_start: draft.start,
+    highlight_end: draft.end,
+    language: input.language,
+    explanation: draft.meaning,
+    part_of_speech: draft.part_of_speech,
+    definition: '',
+    phonetic: draft.phonetic,
+    entry_type: inferEntryType(draft.text),
+  }));
 
   const { data: wordEntries, error: entriesError } = await supabase
     .from('word_entries')
@@ -140,66 +185,82 @@ export async function addWordsFromSentence(
     .select();
   if (entriesError) throw new Error(entriesError.message);
 
-  let finalSentence: SentenceWithSource = sentence;
-  if (translationResult.ok) {
-    const { data: updatedSentence, error: updateError } = await supabase
-      .from('sentences')
-      .update({ translation: translationResult.translation, translation_language: input.language })
-      .eq('id', sentence.id)
-      .select('*, source:sources(*)')
-      .single();
-    if (!updateError && updatedSentence) finalSentence = updatedSentence;
-  }
-
   revalidatePath('/');
 
-  return { sentence: finalSentence, wordEntries: wordEntries ?? [], aiErrors };
+  return { sentence, wordEntries: wordEntries ?? [], skippedWords };
 }
 
-export async function regenerateWordExplanation(
-  wordEntryId: string,
-): Promise<{ ok: true } | { ok: false; error: string }> {
+/** Changes which source a sentence (and every word marked in it) is attributed to. */
+export async function updateSentenceSource(
+  sentenceId: string,
+  selection: SourceSelectionInput,
+): Promise<SentenceWithSource> {
   const user = await requireUser();
   const supabase = await createClient();
 
-  const { data: entry, error: fetchError } = await supabase
-    .from('word_entries')
-    .select('*, sentence:sentences(text)')
-    .eq('id', wordEntryId)
+  const sourceId = await resolveSourceId(supabase, user.id, selection);
+
+  const { data: sentence, error } = await supabase
+    .from('sentences')
+    .update({ source_id: sourceId })
+    .eq('id', sentenceId)
     .eq('user_id', user.id)
+    .select('*, source:sources(*)')
     .single();
-  if (fetchError || !entry) return { ok: false, error: 'Word not found.' };
-
-  const dictEntry = await getOrFetchDictionaryEntry(supabase, entry.headword);
-  const result = await generateWordExplanation({
-    word: entry.word,
-    sentence: entry.sentence.text,
-    highlightStart: entry.highlight_start,
-    highlightEnd: entry.highlight_end,
-    language: entry.language,
-    dictionaryMeanings: dictEntry?.meanings,
-  });
-
-  if (!result.ok) return { ok: false, error: result.error.message };
-
-  const { error: updateError } = await supabase
-    .from('word_entries')
-    .update({
-      explanation: result.data.explanation,
-      part_of_speech: result.data.part_of_speech,
-      definition: result.data.definition,
-    })
-    .eq('id', wordEntryId);
-  if (updateError) return { ok: false, error: updateError.message };
+  if (error) throw new Error(error.message);
 
   revalidatePath('/');
-  revalidatePath('/review');
-  return { ok: true };
+  return sentence;
+}
+
+export interface LookupWordInput {
+  word: string;
+  sentence: string;
+  language: ExplanationLanguage;
+}
+
+export type LookupWordResult =
+  | {
+      ok: true;
+      data: { phonetic: string; part_of_speech: string; meaning: string; sentenceTranslation: string };
+    }
+  | { ok: false; error: string };
+
+/** Client-triggered AI explanation of a word as used in its sentence. */
+export async function lookupWordEntry(input: LookupWordInput): Promise<LookupWordResult> {
+  await requireUser();
+
+  const entryType = inferEntryType(input.word);
+  const result = await generateWordExplanation({ ...input, entryType });
+  if (!result.ok) return { ok: false, error: result.error.message };
+
+  return {
+    ok: true,
+    data: {
+      phonetic: result.data.phonetic,
+      part_of_speech: result.data.partOfSpeech,
+      meaning: result.data.explanation,
+      sentenceTranslation: result.data.sentenceTranslation,
+    },
+  };
+}
+
+export type TranslateSentenceForFormResult = { ok: true; translation: string } | { ok: false; error: string };
+
+/** Client-triggered AI translation of the whole sentence, independent of any single word. */
+export async function translateSentenceForForm(
+  sentenceText: string,
+  language: ExplanationLanguage,
+): Promise<TranslateSentenceForFormResult> {
+  await requireUser();
+  const result = await translateSentence(sentenceText, language);
+  if (!result.ok) return { ok: false, error: result.error.message };
+  return { ok: true, translation: result.translation };
 }
 
 export async function updateWordExplanation(
   wordEntryId: string,
-  fields: Partial<Pick<WordEntry, 'explanation' | 'part_of_speech' | 'definition'>>,
+  fields: Partial<Pick<WordEntry, 'explanation' | 'part_of_speech' | 'definition' | 'phonetic'>>,
 ): Promise<void> {
   const user = await requireUser();
   const supabase = await createClient();
@@ -212,7 +273,6 @@ export async function updateWordExplanation(
   if (error) throw new Error(error.message);
 
   revalidatePath('/');
-  revalidatePath('/review');
 }
 
 export async function deleteWord(wordEntryId: string): Promise<void> {
@@ -227,5 +287,4 @@ export async function deleteWord(wordEntryId: string): Promise<void> {
   if (error) throw new Error(error.message);
 
   revalidatePath('/');
-  revalidatePath('/review');
 }

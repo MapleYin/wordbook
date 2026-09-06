@@ -37,11 +37,11 @@ export function SourcePicker({ sources, value, onChange }: SourcePickerProps) {
 
   return (
     <div className="flex flex-col gap-2 font-sans text-sm">
-      <label className="text-ink/70">Source (optional)</label>
+      <label className="font-medium text-foreground">Source (optional)</label>
       <select
         value={showNewSourceFields ? NEW_SOURCE_VALUE : value.sourceId ?? NO_SOURCE_VALUE}
         onChange={(e) => handleSelectChange(e.target.value)}
-        className="rounded-md border border-ink/20 bg-white/60 px-3 py-2 text-ink outline-none focus:border-ink"
+        className="h-9 rounded-md border border-border bg-card px-3 text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <option value={NO_SOURCE_VALUE}>No source</option>
         {sources.map((source) => (
@@ -59,12 +59,12 @@ export function SourcePicker({ sources, value, onChange }: SourcePickerProps) {
             placeholder="Book or article title"
             value={value.newSourceTitle ?? ''}
             onChange={(e) => onChange({ ...value, newSourceTitle: e.target.value })}
-            className="flex-1 rounded-md border border-ink/20 bg-white/60 px-3 py-2 text-ink outline-none focus:border-ink"
+            className="h-9 flex-1 rounded-md border border-border bg-card px-3 text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
           <select
             value={value.newSourceType}
             onChange={(e) => onChange({ ...value, newSourceType: e.target.value as SourceType })}
-            className="rounded-md border border-ink/20 bg-white/60 px-2 py-2 text-ink outline-none focus:border-ink"
+            className="h-9 rounded-md border border-border bg-card px-2 text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <option value="book">Book</option>
             <option value="article">Article</option>

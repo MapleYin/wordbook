@@ -44,22 +44,24 @@ export default async function HomePage() {
   const wordEntries = (words ?? []) as WordEntryWithSentence[];
   const headwords = [...new Set(wordEntries.map((w) => w.headword))];
 
-  const dictionaryByHeadword: Record<string, Pick<DictionaryEntry, 'phonetic' | 'audio_url'>> = {};
+  const dictionaryByHeadword: Record<string, Pick<DictionaryEntry, 'phonetic'>> = {};
   if (headwords.length > 0) {
     const { data: dictRows } = await supabase
       .from('word_dictionary_cache')
-      .select('headword, phonetic, audio_url')
+      .select('headword, phonetic')
       .in('headword', headwords);
     for (const row of dictRows ?? []) {
-      dictionaryByHeadword[row.headword] = { phonetic: row.phonetic, audio_url: row.audio_url };
+      dictionaryByHeadword[row.headword] = { phonetic: row.phonetic };
     }
   }
 
   return (
     <>
       <TopNav signedIn />
-      <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-8 px-6 pb-16">
-        <AddWordForm sources={sources} />
+      <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-8 px-6 pb-16">
+        <div className="mx-auto w-full max-w-2xl">
+          <AddWordForm sources={sources} />
+        </div>
         <WordList words={wordEntries} sources={sources} dictionaryByHeadword={dictionaryByHeadword} />
       </main>
     </>
